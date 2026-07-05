@@ -2,7 +2,7 @@
 
 A highly constrained, autonomous agentic loop designed to scaffold and manage software projects strictly within a 4GB VRAM budget. Built entirely in TypeScript, this system leverages the Qwen 2.5 Coder 3B model via `llama.cpp` and employs a deterministic "Airlock" architecture to prevent LLM hallucinations from breaking the autonomous loop.
 
-## 🚀 Key Features
+##  Key Features
 
 * **Incremental Process Model**: Adheres to strict, single-step execution boundaries. The system plans one step, scaffolds the code, dynamically tests it, and then commits the changes via a Git-backed sandbox.
 * **Orchestrator-Evaluator Pattern**: The engine autonomously evaluates its own progress against the overarching objective using a dual-persona pattern. The **Orchestrator** plans the execution, while the **Evaluator** uses the base model to verify completion.
@@ -13,7 +13,7 @@ A highly constrained, autonomous agentic loop designed to scaffold and manage so
   * **Strict GBNF Grammars**: Enforces valid JSON emission natively at the inference level (`llama.cpp` GBNF) to ensure the State Machine never crashes due to malformed output.
   * **Forbidden Command Blocking**: Sandboxes terminal verification commands to prevent the LLM from trying to manually inject code via shell (e.g., blocking `echo ... > file`).
 
-## 🧠 Architecture Overview
+##  Architecture Overview
 
 ### 1. Agent Engine (`AgentEngine.ts`)
 The central nervous system of the agent. It implements the bounded event loop that drives the `IDLE -> ORCHESTRATOR -> CODING -> VERIFYING -> DEBUG -> COMPLETED` state machine. It parses GBNF outputs and dynamically swaps the active persona.
@@ -27,7 +27,7 @@ The execution sandbox. It parses unified diffs and executes verification command
 ### 4. Workspace Memory (`WorkspaceMemory.ts`)
 Manages the agent's short-term and long-term memory. It maintains the project's overarching objective (`project.md`), tracks known bugs across rollbacks (`known_bugs.md`), and intelligently builds the context window using only relevant tracked files.
 
-## 🛠️ Setup & Execution
+##  Setup & Execution
 
 ### Prerequisites
 * Node.js (v18+)
