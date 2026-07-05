@@ -1,0 +1,12 @@
+node_modules/
+test/node_modules/
+models/
+lora_outputs/
+data/
+llama-bin/
+llama.cpp/
+.agents/
+__pycache__/
+*.zip
+*.gguf
+*.log

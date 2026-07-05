@@ -1,0 +1,6 @@
+root ::= "{" ws "\"isComplete\"" ws ":" ws boolean "," ws "\"reasoning\"" ws ":" ws string "}"
+boolean ::= "true" | "false"
+string ::= "\"" json-char* "\""
+json-char ::= [^"\\\x00-\x1F] | "\\" (["\\/bfnrt] | "u" hex hex hex hex)
+hex ::= [0-9a-fA-F]
+ws ::= [ \t\n\r]*

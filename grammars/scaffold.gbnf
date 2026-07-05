@@ -1,0 +1,5 @@
+root ::= "{" ws "\"code\"" ws ":" ws string "," ws "\"explanation\"" ws ":" ws string "}"
+ws ::= [ \t\n\r]*
+string ::= "\"" json-char* "\""
+json-char ::= [^"\\\x00-\x1F] | "\\" (["\\/bfnrt] | "u" hex hex hex hex)
+hex ::= [0-9a-fA-F]

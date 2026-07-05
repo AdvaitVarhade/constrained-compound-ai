@@ -1,0 +1,7 @@
+root ::= "{" ws "\"action\"" ws ":" ws action_val "," ws "\"targetFile\"" ws ":" ws target_val "," ws "\"reasoning\"" ws ":" ws string "}"
+ws ::= [ \t\n\r]*
+action_val ::= "\"write_code\"" | "\"run_tests\"" | "\"done\""
+target_val ::= "null" | string
+string ::= "\"" json-char* "\""
+json-char ::= [^"\\\x00-\x1F] | "\\" (["\\/bfnrt] | "u" hex hex hex hex)
+hex ::= [0-9a-fA-F]
