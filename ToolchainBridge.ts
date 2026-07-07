@@ -143,6 +143,22 @@ export class ToolchainBridge {
     }
 
     /**
+     * Retrieves all tracked source files, filtering out memory files and gitignores.
+     */
+    public async getTrackedFiles(): Promise<string[]> {
+        await this.assertRepositoryBoundary();
+        const output = await this.readGitValue(['ls-files']);
+        return output.split(/\r?\n/)
+            .map(line => line.trim())
+            .filter(line => {
+                if (line.length === 0) return false;
+                if (['architecture.md', 'project.md', 'known_bugs.md', '.gitignore'].includes(line)) return false;
+                if (line.startsWith('node_modules/')) return false;
+                return true;
+            });
+    }
+
+    /**
      * Runs a command without invoking cmd.exe, PowerShell, /bin/sh, or any other
      * shell. Consequently, metacharacters in args are passed literally rather than
      * becoming command injection primitives.

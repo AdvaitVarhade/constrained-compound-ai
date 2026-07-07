@@ -122,7 +122,7 @@ const DEFAULT_CONTEXT_WINDOW_TOKENS = 4_096;
 const DEFAULT_PROMPT_SAFETY_TOKENS = 64;
 const DEFAULT_MAX_TARGET_FILE_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MAX_DIAGNOSTIC_CHARS = 8_000;
-const APPROXIMATE_CHARACTERS_PER_TOKEN = 4;
+const APPROXIMATE_CHARACTERS_PER_TOKEN = 2.2;
 
 const ORCHESTRATOR_MAX_OUTPUT_TOKENS = 256;
 const CODER_MAX_OUTPUT_TOKENS = 2048;
@@ -443,8 +443,9 @@ export class AgentEngine {
             'ROLE: Orchestrator.',
             `RUN_SEQUENCE: ${this.runSequence}; ITERATION: ${iteration}.`,
             'Choose exactly one next action from write_code, run_tests, or done.',
-            'For write_code, provide targetFile and optionally command.',
+            'For write_code, provide targetFile and optionally a verification command (e.g. npx tsc --noEmit).',
             'For run_tests, optionally provide command. A command is executable plus arguments, never shell syntax.',
+            'CRITICAL: The command property is ONLY for running tests or type-checking (e.g. tsc, jest). NEVER write shell commands like echo, cat, or redirect operators (> or >>) to create or edit files. File edits must be left entirely to the Coder.',
             'Use done only when the project objective is demonstrably complete.',
             'Return exactly one JSON object in this property order:',
             '{"action":"write_code|run_tests|done","targetFile":"optional","command":"optional"}',
@@ -474,6 +475,15 @@ export class AgentEngine {
     private async evaluateCompletion(): Promise<boolean> {
         try {
             const projectMarkdown = await this.memory.readProject();
+            const files = await this.toolchain.getTrackedFiles();
+            
+            let codebaseContent = '';
+            for (const file of files) {
+                const target = await this.readTargetFile(file);
+                if (target.exists) {
+                    codebaseContent += `### File: ${file}\n\`\`\`\n${target.content}\n\`\`\`\n\n`;
+                }
+            }
             
             // Use the base model by disabling all LoRA adapters
             await this.gateway.swapLoRA([
@@ -481,7 +491,20 @@ export class AgentEngine {
                 { id: this.adapters.coder, scale: 0 }
             ]);
             
-            const prompt = `${projectMarkdown}\n\nReview the Objective and the Current Status. Has the objective been fully achieved? Return true if complete, false otherwise.`;
+            const instruction = [
+                'ROLE: Evaluator.',
+                'Review the Objective, the Current Status, and the actual workspace files.',
+                'Has the overarching objective been fully and correctly implemented in the code?',
+                'Return exactly {"isComplete": true|false, "reasoning": "<short reasoning>"}',
+                'Do not include Markdown fences or additional properties.'
+            ].join('\n');
+
+            const sections: PromptSection[] = [
+                { label: 'PROJECT STATE', content: projectMarkdown, trimPriority: 2, keep: 'both' },
+                { label: 'WORKSPACE FILES', content: codebaseContent || '(no workspace files written yet)', trimPriority: 1, keep: 'head' }
+            ];
+
+            const prompt = this.buildBoundedPrompt(instruction, sections, 512);
             
             const rawResponse = await this.gateway.requestCompletion({
                 prompt,
@@ -492,7 +515,7 @@ export class AgentEngine {
             });
             
             try {
-                const parsed = this.parseJsonObject(rawResponse);
+                const parsed = this.parseJsonObject(rawResponse, 'Evaluator');
                 if (typeof parsed.isComplete === 'boolean') {
                     return parsed.isComplete;
                 }
@@ -633,18 +656,21 @@ export class AgentEngine {
         const target = await this.readTargetFile(targetFile);
         const isNewFile = !target.exists;
         const targetLineCount = isNewFile ? 0 : this.countLines(target.content);
+        const useScaffold = isNewFile || targetLineCount <= 100;
 
-        const instruction = isNewFile ? [
+        const instruction = useScaffold ? [
             'ROLE: Coder.',
             `RUN_SEQUENCE: ${this.runSequence}; ITERATION: ${iteration}; ATTEMPT: ${attempt}.`,
             `TARGET_FILE: ${targetFile}`,
-            'Generate the complete, raw file contents for this new file.',
+            'CRITICAL: Implement the full objective (Express, Redis, WebSockets) in a single clean, concise script. Convert WebSocket raw message payloads (RawData) to string using `message.toString()` before passing them to Redis. Avoid comments, boilerplate, or explanations inside the code. Do NOT write stubs.',
+            'Generate the complete, raw file contents for this file.',
             'Return exactly {"code":"<JSON-escaped file string>", "explanation":"<short reason>"}',
             'Do not include Markdown fences or additional properties.'
         ].join('\n') : [
             'ROLE: Coder.',
             `RUN_SEQUENCE: ${this.runSequence}; ITERATION: ${iteration}; ATTEMPT: ${attempt}.`,
             `TARGET_FILE: ${targetFile}`,
+            'CRITICAL: Implement the full objective (Express, Redis, WebSockets). Keep the edit concise and clean. Avoid comments or stubs.',
             'Generate one valid Unified Diff for only TARGET_FILE.',
             'Delta generation is mandatory. Do not rewrite an entire file longer than 100 lines.',
             'Keep unchanged context lines in each hunk. Never emit shell commands.',
@@ -679,16 +705,18 @@ export class AgentEngine {
             max_tokens: CODER_MAX_OUTPUT_TOKENS,
             temperature: 0,
             seed: 0,
-            grammar: isNewFile ? SCAFFOLD_GBNF : CODER_GBNF
+            grammar: useScaffold ? SCAFFOLD_GBNF : CODER_GBNF
         });
         this.assertNotAborted(signal);
 
-        if (isNewFile) {
+        if (useScaffold) {
             const payload = JSON.parse(raw);
             const result = await this.toolchain.runCheckpointedEdit(() =>
-                this.memory.writeNewFile(targetFile, payload.code)
+                isNewFile
+                    ? this.memory.writeNewFile(targetFile, payload.code)
+                    : this.memory.overwriteFile(targetFile, payload.code)
             );
-            this.emit('New file scaffolded inside active checkpoint.', {
+            this.emit(isNewFile ? 'New file scaffolded inside active checkpoint.' : 'File overwritten inside active checkpoint.', {
                 targetFile
             });
         } else {

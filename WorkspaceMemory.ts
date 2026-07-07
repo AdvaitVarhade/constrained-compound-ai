@@ -73,7 +73,7 @@ interface Match {
 }
 
 const DEFAULT_TOKEN_BUDGET = 4_000;
-const DEFAULT_CHARS_PER_TOKEN = 4;
+const DEFAULT_CHARS_PER_TOKEN = 2.2;
 const DEFAULT_MAX_MEMORY_FILE_BYTES = 4 * 1024 * 1024;
 const DEFAULT_FUZZY_THRESHOLD = 0.20;
 const DEFAULT_FUZZY_SEARCH_RADIUS = 200;
@@ -389,6 +389,21 @@ export class WorkspaceMemory {
             }
             throw error;
         }
+    }
+
+    /**
+     * Overwrites an existing file atomically. Useful for small files where full
+     * rewrites are safer and easier for the LLM than unified diffs.
+     */
+    async overwriteFile(targetFile: string, content: string): Promise<ApplyDiffResult> {
+        const absoluteTarget = this.resolveWorkspacePath(targetFile);
+        await this.atomicWrite(absoluteTarget, content);
+        return {
+            targetPath: absoluteTarget,
+            hunksApplied: 1,
+            changed: true,
+            matchScores: [1.0]
+        };
     }
 
     private async readMemoryFile(fileName: MemoryFileName): Promise<string> {
