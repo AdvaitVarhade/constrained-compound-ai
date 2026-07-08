@@ -555,16 +555,18 @@ export class AgentEngine {
 
         const targetFiles = decision.targetFile.split(',').map(file => this.validateTargetPath(file.trim()));
         const command = this.resolveVerificationCommand(decision.command);
-        this.transition(
-            AgentEngineState.CHECKPOINTING,
-            `Creating pre-edit checkpoint for multi-file edit: ${targetFiles.join(', ')}.`
-        );
-        await this.toolchain.createGitCheckpoint();
-
         let lastFailure = 'Coder attempts exhausted.';
 
         for (let attempt = 1; attempt <= this.maxRetries; attempt += 1) {
             this.assertNotAborted(signal);
+
+            if (this.toolchain.getActiveCheckpoint() === null) {
+                this.transition(
+                    AgentEngineState.CHECKPOINTING,
+                    `Creating pre-edit checkpoint for multi-file edit: ${targetFiles.join(', ')}.`
+                );
+                await this.toolchain.createGitCheckpoint();
+            }
 
             let coderFailed = false;
             try {
@@ -585,7 +587,7 @@ export class AgentEngine {
                 // Roll back changes made during this failed attempt
                 await this.toolchain.executeRollback();
                 
-                await this.appendKnownBugWithinCheckpoint(
+                await this.appendKnownBug(
                     this.formatInternalFailureEntry(
                         'Coder or diff application failed',
                         targetFiles.join(', '),
@@ -593,6 +595,7 @@ export class AgentEngine {
                         attempt
                     )
                 );
+                await this.commitDiagnostics();
 
                 if (attempt < this.maxRetries) {
                     continue;
@@ -1207,6 +1210,15 @@ export class AgentEngine {
 
     private async appendKnownBugWithinCheckpoint(entry: string): Promise<void> {
         await this.toolchain.runCheckpointedEdit(() => this.appendKnownBug(entry));
+    }
+
+    private async commitDiagnostics(): Promise<void> {
+        try {
+            await this.toolchain.runSubprocess('git', ['add', 'known_bugs.md']);
+            await this.toolchain.runSubprocess('git', ['commit', '-m', 'ai-diagnostics: record failure', '--allow-empty']);
+        } catch (err) {
+            // Ignore if commit fails
+        }
     }
 
     private async appendKnownBug(entry: string): Promise<void> {
