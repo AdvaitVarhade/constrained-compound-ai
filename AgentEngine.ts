@@ -4,8 +4,9 @@
 // persistent workspace memory, fuzzy diff application, verification, and Git-backed
 // recovery. The engine contains policy; the injected modules contain mechanisms.
 
-import { stat, readFile } from 'node:fs/promises';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { stat, readFile, readdir } from 'node:fs/promises';
+import { isAbsolute, relative, resolve, join } from 'node:path';
+
 
 import { InferenceGateway } from './InferenceGateway';
 import { WorkspaceMemory, type WorkspaceContext } from './WorkspaceMemory';
@@ -691,7 +692,7 @@ export class AgentEngine {
             'ROLE: Coder.',
             `RUN_SEQUENCE: ${this.runSequence}; ITERATION: ${iteration}; ATTEMPT: ${attempt}.`,
             `TARGET_FILE: ${targetFile}`,
-            'CRITICAL: Implement the full objective (Express, Redis, WebSockets) in a single clean, concise script. Convert WebSocket raw message payloads (RawData) to string using `message.toString()` before passing them to Redis. Avoid comments, boilerplate, or explanations inside the code. Do NOT write stubs.',
+            'CRITICAL: Implement the target file cleanly and concisely as described in the objective. Avoid comments, boilerplate, or explanations inside the code. Do NOT write stubs.',
             'Generate the complete, raw file contents for this file.',
             'Return exactly {"code":"<JSON-escaped file string>", "explanation":"success"}',
             'Do not include Markdown fences or additional properties.'
@@ -699,7 +700,7 @@ export class AgentEngine {
             'ROLE: Coder.',
             `RUN_SEQUENCE: ${this.runSequence}; ITERATION: ${iteration}; ATTEMPT: ${attempt}.`,
             `TARGET_FILE: ${targetFile}`,
-            'CRITICAL: Implement the full objective (Express, Redis, WebSockets). Keep the edit concise and clean. Avoid comments or stubs.',
+            'CRITICAL: Implement the objective for target file. Keep the edit concise and clean. Avoid comments or stubs.',
             'Generate one valid Unified Diff for only TARGET_FILE.',
             'Delta generation is mandatory. Do not rewrite an entire file longer than 100 lines.',
             'Keep unchanged context lines in each hunk. Never emit shell commands.',
@@ -708,6 +709,17 @@ export class AgentEngine {
         ].join('\r\n');
 
         const sections = this.memorySections(context);
+
+        const workspaceFiles = await this.getWorkspaceFilesContent(targetFile);
+        if (workspaceFiles.length > 0) {
+            sections.push({
+                label: 'WORKSPACE FILES',
+                content: workspaceFiles,
+                trimPriority: 3,
+                keep: 'both'
+            });
+        }
+
         if (!isNewFile) {
             sections.push({
                 label: `CURRENT TARGET (${targetLineCount} lines)`,
@@ -810,6 +822,43 @@ export class AgentEngine {
             process: processResult,
             failureSummary
         };
+    }
+
+    private async getWorkspaceFilesContent(excludeFile?: string): Promise<string> {
+        const root = this.memory.workspaceRoot;
+        try {
+            const files = await readdir(root);
+            const parts: string[] = [];
+            for (const file of files) {
+                const fullPath = join(root, file);
+                const fileStat = await stat(fullPath);
+                if (fileStat.isFile()) {
+                    const name = file.toLowerCase();
+                    if (
+                        name === excludeFile?.toLowerCase() ||
+                        name === 'project.md' ||
+                        name === 'architecture.md' ||
+                        name === 'known_bugs.md' ||
+                        name === 'package.json' ||
+                        name === 'package-lock.json' ||
+                        name === 'tsconfig.json' ||
+                        name === '.gitignore' ||
+                        name.endsWith('.log')
+                    ) {
+                        continue;
+                    }
+                    try {
+                        const content = await readFile(fullPath, 'utf8');
+                        parts.push(`### ${file}\r\n\`\`\`typescript\r\n${content}\r\n\`\`\``);
+                    } catch (err) {
+                        // Ignore read errors
+                    }
+                }
+            }
+            return parts.join('\r\n\r\n');
+        } catch (err) {
+            return '';
+        }
     }
 
     /**

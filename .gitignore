@@ -12,3 +12,5 @@ __pycache__/
 *.log
 test-cli/
 scratch/
+my-fib/
+realtime-chat/
