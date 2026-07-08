@@ -151,7 +151,7 @@ ws ::= [ \t\n\r]*
 `.trim();
 
 const SCAFFOLD_GBNF = String.raw`
-root ::= "{" ws "\"code\"" ws ":" ws json-string ws "," ws "\"explanation\"" ws ":" ws json-string ws "}"
+root ::= "{" ws "\"code\"" ws ":" ws json-string ws "," ws "\"explanation\"" ws ":" ws "\"success\"" ws "}"
 json-string ::= "\"" json-char* "\""
 json-char ::= [^"\\\x00-\x1F] | "\\" (["\\/bfnrt] | "u" hex hex hex hex)
 hex ::= [0-9a-fA-F]
@@ -443,14 +443,14 @@ export class AgentEngine {
             'ROLE: Orchestrator.',
             `RUN_SEQUENCE: ${this.runSequence}; ITERATION: ${iteration}.`,
             'Choose exactly one next action from write_code, run_tests, or done.',
-            'For write_code, provide targetFile and optionally a verification command (e.g. npx tsc --noEmit).',
+            'For write_code, provide targetFile (e.g. "index.ts" or a comma-separated list like "math.ts, main.ts" to edit multiple files) and optionally a verification command (e.g. npx tsc --noEmit).',
             'For run_tests, optionally provide command. A command is executable plus arguments, never shell syntax.',
             'CRITICAL: The command property is ONLY for running tests or type-checking (e.g. tsc, jest). NEVER write shell commands like echo, cat, or redirect operators (> or >>) to create or edit files. File edits must be left entirely to the Coder.',
             'Use done only when the project objective is demonstrably complete.',
             'Return exactly one JSON object in this property order:',
             '{"action":"write_code|run_tests|done","targetFile":"optional","command":"optional"}',
             'Do not include Markdown, commentary, or additional properties.'
-        ].join('\n');
+        ].join('\r\n');
 
         const prompt = this.buildBoundedPrompt(
             instruction,
@@ -497,11 +497,12 @@ export class AgentEngine {
                 'Has the overarching objective been fully and correctly implemented in the code?',
                 'Return exactly {"isComplete": true|false, "reasoning": "<short reasoning>"}',
                 'Do not include Markdown fences or additional properties.'
-            ].join('\n');
+            ].join('\r\n');
 
+            const buster = `\r\n\r\n[CacheBust: ${Math.random().toString(36).substring(7)}]`;
             const sections: PromptSection[] = [
-                { label: 'PROJECT STATE', content: projectMarkdown, trimPriority: 2, keep: 'both' },
-                { label: 'WORKSPACE FILES', content: codebaseContent || '(no workspace files written yet)', trimPriority: 1, keep: 'head' }
+                { label: 'PROJECT STATE', content: projectMarkdown + buster, trimPriority: 2, keep: 'both' },
+                { label: 'WORKSPACE FILES', content: (codebaseContent || '(no workspace files written yet)') + buster, trimPriority: 1, keep: 'head' }
             ];
 
             const prompt = this.buildBoundedPrompt(instruction, sections, 512);
@@ -551,11 +552,11 @@ export class AgentEngine {
             throw new Error('write_code action is missing targetFile.');
         }
 
-        const targetFile = this.validateTargetPath(decision.targetFile);
+        const targetFiles = decision.targetFile.split(',').map(file => this.validateTargetPath(file.trim()));
         const command = this.resolveVerificationCommand(decision.command);
         this.transition(
             AgentEngineState.CHECKPOINTING,
-            `Creating pre-edit checkpoint for ${targetFile}.`
+            `Creating pre-edit checkpoint for multi-file edit: ${targetFiles.join(', ')}.`
         );
         await this.toolchain.createGitCheckpoint();
 
@@ -564,23 +565,29 @@ export class AgentEngine {
         for (let attempt = 1; attempt <= this.maxRetries; attempt += 1) {
             this.assertNotAborted(signal);
 
+            let coderFailed = false;
             try {
-                await this.executeCoder(
-                    targetFile,
-                    iteration,
-                    attempt,
-                    signal
-                );
+                for (const targetFile of targetFiles) {
+                    await this.executeCoder(
+                        targetFile,
+                        iteration,
+                        attempt,
+                        signal
+                    );
+                }
             } catch (error) {
                 console.error("❌ CODER FAILED WITH ERROR:", error instanceof Error ? error.stack : error);
                 if (error instanceof EngineAbortError) {
                     throw error;
                 }
                 lastFailure = `Coder/applyDiff failure: ${this.errorMessage(error)}`;
+                // Roll back changes made during this failed attempt
+                await this.toolchain.executeRollback();
+                
                 await this.appendKnownBugWithinCheckpoint(
                     this.formatInternalFailureEntry(
                         'Coder or diff application failed',
-                        targetFile,
+                        targetFiles.join(', '),
                         lastFailure,
                         attempt
                     )
@@ -589,29 +596,51 @@ export class AgentEngine {
                 if (attempt < this.maxRetries) {
                     continue;
                 }
+                coderFailed = true;
                 break;
             }
 
-            const verification = await this.verifyAndDebug({
+            if (coderFailed) {
+                break;
+            }
+
+            let verification = await this.verifyAndDebug({
                 command,
                 iteration,
                 attempt,
-                targetFile,
+                targetFile: undefined,
                 signal,
                 persistFailureWithinCheckpoint: true
             });
 
+            if (!verification.passed) {
+                // Try Self-Healing missing package dependencies!
+                const errorText = (verification.process.stdout || '') + '\n' + (verification.process.stderr || '');
+                const healed = await this.healDependencies(errorText);
+                if (healed) {
+                    // Try immediately re-verifying
+                    verification = await this.verifyAndDebug({
+                        command,
+                        iteration,
+                        attempt,
+                        targetFile: undefined,
+                        signal,
+                        persistFailureWithinCheckpoint: false
+                    });
+                }
+            }
+
             if (verification.passed) {
-                await this.updateProjectAfterSuccess(targetFile, command, attempt);
+                await this.updateProjectAfterSuccess(targetFiles, command, attempt);
                 this.transition(
                     AgentEngineState.COMMITTING,
-                    `Committing verified changes for ${targetFile}.`
+                    `Committing verified changes for ${targetFiles.join(', ')}.`
                 );
                 await this.toolchain.commitCheckpointedChanges(
-                    this.buildVerifiedCommitMessage(targetFile)
+                    this.buildVerifiedCommitMessage(targetFiles)
                 );
                 this.emit('Code transaction verified and committed.', {
-                    targetFile,
+                    targetFiles,
                     attempts: attempt,
                     command: command.display
                 });
@@ -630,7 +659,7 @@ export class AgentEngine {
         // Retry-level logs were inside the rolled-back transaction. Re-add one
         // concise critical record afterward so the next run remembers the failure.
         await this.appendKnownBug(
-            this.formatCriticalRollbackEntry(targetFile, command, lastFailure, rollback)
+            this.formatCriticalRollbackEntry(targetFiles, command, lastFailure, rollback)
         );
         return {
             success: false,
@@ -664,9 +693,9 @@ export class AgentEngine {
             `TARGET_FILE: ${targetFile}`,
             'CRITICAL: Implement the full objective (Express, Redis, WebSockets) in a single clean, concise script. Convert WebSocket raw message payloads (RawData) to string using `message.toString()` before passing them to Redis. Avoid comments, boilerplate, or explanations inside the code. Do NOT write stubs.',
             'Generate the complete, raw file contents for this file.',
-            'Return exactly {"code":"<JSON-escaped file string>", "explanation":"<short reason>"}',
+            'Return exactly {"code":"<JSON-escaped file string>", "explanation":"success"}',
             'Do not include Markdown fences or additional properties.'
-        ].join('\n') : [
+        ].join('\r\n') : [
             'ROLE: Coder.',
             `RUN_SEQUENCE: ${this.runSequence}; ITERATION: ${iteration}; ATTEMPT: ${attempt}.`,
             `TARGET_FILE: ${targetFile}`,
@@ -676,13 +705,9 @@ export class AgentEngine {
             'Keep unchanged context lines in each hunk. Never emit shell commands.',
             'Return exactly {"diff":"<JSON-escaped unified diff>"}.',
             'Do not include Markdown fences or additional properties.'
-        ].join('\n');
+        ].join('\r\n');
 
-        const sections: PromptSection[] = [
-            { label: 'PROJECT STATE', content: context.project, trimPriority: 2, keep: 'both' },
-            { label: 'ARCHITECTURE', content: context.architecture, trimPriority: 1, keep: 'head' }
-        ];
-
+        const sections = this.memorySections(context);
         if (!isNewFile) {
             sections.push({
                 label: `CURRENT TARGET (${targetLineCount} lines)`,
@@ -692,14 +717,13 @@ export class AgentEngine {
             });
         }
         
-        sections.push({ label: 'KNOWN BUGS', content: context.knownBugs, trimPriority: 0, keep: 'tail' });
-        
 
         const prompt = this.buildBoundedPrompt(
             instruction,
             sections,
             CODER_MAX_OUTPUT_TOKENS
         );
+        console.log("DEBUG [executeCoder] prompt:", prompt);
         const raw = await this.gateway.requestCompletion({
             prompt,
             max_tokens: CODER_MAX_OUTPUT_TOKENS,
@@ -707,6 +731,7 @@ export class AgentEngine {
             seed: 0,
             grammar: useScaffold ? SCAFFOLD_GBNF : CODER_GBNF
         });
+        console.log("DEBUG [executeCoder] raw response:", raw);
         this.assertNotAborted(signal);
 
         if (useScaffold) {
@@ -785,6 +810,74 @@ export class AgentEngine {
             process: processResult,
             failureSummary
         };
+    }
+
+    /**
+     * Resolves missing dependency compile/test errors by running npm install inside the sandbox.
+     */
+    private async healDependencies(errorText: string): Promise<boolean> {
+        const regexes = [
+            /Cannot find module '([^'\s]+)'/i,
+            /Could not find a declaration file for module '([^'\s]+)'/i
+        ];
+
+        let packageName: string | null = null;
+        let isTypesError = false;
+
+        for (const regex of regexes) {
+            const match = errorText.match(regex);
+            if (match && match[1]) {
+                packageName = match[1];
+                if (regex.source.includes('declaration file') || errorText.includes('corresponding type declarations')) {
+                    isTypesError = true;
+                }
+                break;
+            }
+        }
+
+        if (!packageName) {
+            return false;
+        }
+
+        // Validate package name safety to prevent arbitrary argument flags
+        const safePackageRegex = /^@?[a-z0-9-_.]+(?:\/[a-z0-9-_.]+)?$/i;
+        if (!safePackageRegex.test(packageName)) {
+            console.warn(`[Self-Healing] Detected unsafe package name suggestion: "${packageName}". Skipping.`);
+            return false;
+        }
+
+        this.transition(
+            AgentEngineState.VERIFYING,
+            `[Self-Healing] Detected missing dependency: "${packageName}". Installing...`
+        );
+
+        try {
+            const installBase = await this.toolchain.runSubprocess('npm', ['install', packageName], 60000);
+            if (installBase.exitCode !== 0) {
+                console.error(`[Self-Healing] Failed to install package "${packageName}":`, installBase.stdout, installBase.stderr);
+                return false;
+            }
+
+            if (isTypesError && !packageName.startsWith('@types/')) {
+                const typesPackage = `@types/${packageName}`;
+                if (safePackageRegex.test(typesPackage)) {
+                    this.transition(
+                        AgentEngineState.VERIFYING,
+                        `[Self-Healing] Installing type definitions: "${typesPackage}"...`
+                    );
+                    await this.toolchain.runSubprocess('npm', ['install', '-D', typesPackage], 60000);
+                }
+            }
+
+            this.transition(
+                AgentEngineState.VERIFYING,
+                `[Self-Healing] Successfully installed missing dependencies for "${packageName}".`
+            );
+            return true;
+        } catch (err) {
+            console.error('[Self-Healing] Error running npm install:', err);
+            return false;
+        }
     }
 
     private parseJsonObject(raw: string, role: string): Record<string, unknown> {
@@ -963,9 +1056,9 @@ export class AgentEngine {
         const render = (): string => [
             instruction.trim(),
             ...mutable.map(
-                (section) => `## ${section.label}\n${section.content.trim()}`
+                (section) => `## ${section.label}\r\n${section.content.trim()}`
             )
-        ].join('\n\n');
+        ].join('\r\n\r\n');
 
         let prompt = render();
         for (const section of [...mutable].sort(
@@ -1002,10 +1095,11 @@ export class AgentEngine {
     }
 
     private memorySections(context: WorkspaceContext): PromptSection[] {
+        const buster = `\r\n\r\n[CacheBust: ${Math.random().toString(36).substring(7)}]`;
         return [
-            { label: 'ARCHITECTURE', content: context.architecture, trimPriority: 1, keep: 'head' },
-            { label: 'PROJECT STATE', content: context.project, trimPriority: 2, keep: 'both' },
-            { label: 'KNOWN BUGS', content: context.knownBugs, trimPriority: 0, keep: 'tail' }
+            { label: 'ARCHITECTURE', content: context.architecture + buster, trimPriority: 1, keep: 'head' },
+            { label: 'PROJECT STATE', content: context.project + buster, trimPriority: 2, keep: 'both' },
+            { label: 'KNOWN BUGS', content: context.knownBugs + buster, trimPriority: 0, keep: 'tail' }
         ];
     }
 
@@ -1042,7 +1136,7 @@ export class AgentEngine {
     }
 
     private async updateProjectAfterSuccess(
-        targetFile: string,
+        targetFiles: string[],
         command: VerificationCommand,
         attempts: number
     ): Promise<void> {
@@ -1050,10 +1144,11 @@ export class AgentEngine {
             const current = await this.memory.readProject();
             const isCrLf = /\r\n/u.test(current);
             const nl = isCrLf ? '\r\n' : '\n';
+            const targetsStr = targetFiles.map(f => `\`${this.escapeInlineCode(f)}\``).join(', ');
             const entry = [
                 '',
                 `## Verified AI change — ${new Date().toISOString()}`,
-                `- Target: \`${this.escapeInlineCode(targetFile)}\``,
+                `- Targets: ${targetsStr}`,
                 `- Verification: \`${this.escapeInlineCode(command.display)}\``,
                 `- Attempts: ${attempts}`
             ].join(nl);
@@ -1111,14 +1206,14 @@ export class AgentEngine {
     }
 
     private formatCriticalRollbackEntry(
-        targetFile: string,
+        targetFiles: string[],
         command: VerificationCommand,
         failure: string,
         rollback: RollbackResult
     ): string {
         return [
             `## Critical rollback — ${new Date().toISOString()}`,
-            `- Target: \`${this.escapeInlineCode(targetFile)}\``,
+            `- Targets: ${targetFiles.map(f => `\`${this.escapeInlineCode(f)}\``).join(', ')}`,
             `- Verification: \`${this.escapeInlineCode(command.display)}\``,
             `- Attempts exhausted: ${this.maxRetries}`,
             `- Restored commit: \`${rollback.resetToHash}\``,
@@ -1185,8 +1280,9 @@ export class AgentEngine {
         );
     }
 
-    private buildVerifiedCommitMessage(targetFile: string): string {
-        const normalized = targetFile.replace(/[\r\n\0]/gu, '').slice(0, 140);
+    private buildVerifiedCommitMessage(targetFiles: string[]): string {
+        const filesStr = targetFiles.join(', ');
+        const normalized = filesStr.replace(/[\r\n\0]/gu, '').slice(0, 140);
         return `ai-verified: ${normalized}`;
     }
 

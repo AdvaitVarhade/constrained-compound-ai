@@ -7,11 +7,17 @@ A highly constrained, autonomous agentic loop designed to scaffold and manage so
 * **Incremental Process Model**: Adheres to strict, single-step execution boundaries. The system plans one step, scaffolds the code, dynamically tests it, and then commits the changes via a Git-backed sandbox.
 * **Orchestrator-Evaluator Pattern**: The engine autonomously evaluates its own progress against the overarching objective using a dual-persona pattern. The **Orchestrator** plans the execution, while the **Evaluator** uses the base model to verify completion.
 * **LoRA Hot-Swapping**: Operates entirely within 4GB VRAM by multiplexing multiple LoRA adapters (Orchestrator, Coder, Debugger) on top of a single base model. Adapters are hot-swapped in milliseconds between inference phases.
+* **Self-Healing Sandbox Dependencies**: Dynamically parses compilation/verification errors for missing npm modules or typescript type declarations, automatically executes safe `npm install` inside the sandbox, and immediately re-triggers verification.
+* **Multi-File Scoped Transactions**: Supports orchestration and editing of multiple target files sequentially within a single transactional Git checkpoint before compiling and committing.
+* **Command-Line Interface (CLI)**: Features a CLI runner (`cli.ts`) allowing users to execute the Agent OS against any target directory with a custom objective and iteration boundaries.
+* **KV Cache Slot Protection**: Implements randomized section-level cache-busting sequences to force the `llama-server` to evaluate from scratch on persona/LoRA swaps, completely preventing KV cache slot leakage and model corruption.
+* **GBNF Explanation Key-Locking**: Locks the GBNF grammar `"explanation"` property to a fixed value (`"success"`) for code scaffolding to prevent smaller Coder models from falling into infinite explanation repetition loops.
 * **Deterministic Sandboxing (`ToolchainBridge.ts` & `WorkspaceMemory.ts`)**:
   * **Git-Backed Rollbacks**: If the Coder generates a malformed diff or introduces a syntax error, the transaction is instantly rolled back to the pre-edit Git commit.
   * **Output Sanitization**: Strips markdown fences from hallucinated LLM responses before passing them into the deterministic JSON parsers.
   * **Strict GBNF Grammars**: Enforces valid JSON emission natively at the inference level (`llama.cpp` GBNF) to ensure the State Machine never crashes due to malformed output.
   * **Forbidden Command Blocking**: Sandboxes terminal verification commands to prevent the LLM from trying to manually inject code via shell (e.g., blocking `echo ... > file`).
+
 
 ##  Architecture Overview
 

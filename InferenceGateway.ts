@@ -73,9 +73,10 @@ export class InferenceGateway {
      */
     async requestCompletion(options: CompletionOptions): Promise<string> {
         try {
+            const cacheBuster = `<!-- cache_bust: ${Math.random().toString(36).substring(7)} -->\n`;
             // Enforcement: Deterministic JSON Outputs
             const payload = {
-                prompt: options.prompt,
+                prompt: cacheBuster + options.prompt,
                 n_predict: options.max_tokens ?? 2048,
                 temperature: 0, // Rigidly locked
                 seed: 42,       // Rigidly locked
